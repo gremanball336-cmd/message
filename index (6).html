@@ -1,0 +1,105 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+    <meta charset="UTF-8">
+    <title>Guestbook · GitHub Pages Ready</title>
+</head>
+<body>
+    <h2>📝 leave a message</h2>
+    <div>
+        <input id="name" placeholder="your name" style="margin-bottom:5px; width:200px;"><br>
+        <textarea id="msg" rows="3" cols="30" placeholder="your message..."></textarea><br>
+        <button onclick="postMessage()">post message</button>
+        <button onclick="clearMessages()">clear all</button>
+    </div>
+    <hr>
+    <h3>recent messages</h3>
+    <div id="messageList"></div>
+
+    <script>
+        // 初始化：尝试从 localStorage 读取，如果没有就返回空数组
+        let messages = [];
+        try {
+            const saved = localStorage.getItem('gb_messages');
+            messages = saved ? JSON.parse(saved) : [];
+        } catch (e) {
+            messages = []; // 如果 localStorage 不可用（比如在file协议下），就初始化为空
+        }
+
+        // 保存函数（带错误处理）
+        function saveMessages() {
+            try {
+                localStorage.setItem('gb_messages', JSON.stringify(messages));
+            } catch (e) {
+                console.warn('localStorage not available, messages will not persist');
+            }
+        }
+
+        // 显示留言
+        function displayMessages() {
+            const container = document.getElementById('messageList');
+            if (!container) return;
+            
+            if (messages.length === 0) {
+                container.innerHTML = '<div style="color:#666;">— no messages yet —</div>';
+                return;
+            }
+            
+            let html = '';
+            for (let i = messages.length - 1; i >= 0; i--) { // 最新的显示在前面
+                const msg = messages[i];
+                html += `<div style="border:1px solid #ccc; padding:8px; margin-bottom:5px;">
+                    <strong>${escapeHtml(msg.name || 'anonymous')}:</strong> 
+                    <span>${escapeHtml(msg.text || '')}</span>
+                </div>`;
+            }
+            container.innerHTML = html;
+        }
+
+        // 防XSS
+        function escapeHtml(unsafe) {
+            if (!unsafe) return '';
+            return unsafe
+                .replace(/&/g, '&amp;')
+                .replace(/</g, '&lt;')
+                .replace(/>/g, '&gt;')
+                .replace(/"/g, '&quot;')
+                .replace(/'/g, '&#039;');
+        }
+
+        // 发布留言
+        function postMessage() {
+            const nameInput = document.getElementById('name');
+            const msgInput = document.getElementById('msg');
+            
+            const name = nameInput.value.trim();
+            const text = msgInput.value.trim();
+            
+            if (!name || !text) {
+                alert('name and message are required');
+                return;
+            }
+            
+            messages.push({ name: name, text: text });
+            saveMessages();
+            displayMessages();
+            
+            // 清空输入框
+            nameInput.value = '';
+            msgInput.value = '';
+        }
+
+        // 清空所有
+        function clearMessages() {
+            if (confirm('delete all messages?')) {
+                messages = [];
+                saveMessages();
+                displayMessages();
+            }
+        }
+
+        // 页面加载时显示
+        displayMessages();
+    </script>
+</body>
+</html>
