@@ -15,88 +15,337 @@
     
     <hr>
     <div id="messageList">loading...</div>
+    
+    <div style="margin-top:10px; font-size:12px; color:#666;" id="status">
+        🌐 waiting for peers...
+    </div>
 
-    <script src="https://cdn.jsdelivr.net/npm/ipfs-http-client@50.1.2/dist/index.min.js"></script>
     <script>
-        const ipfs = IpfsHttpClient('https://ipfs.infura.io:5001');
-        let currentCid = localStorage.getItem('lastCid') || null;
+        // 配置
+        const ROOM_NAME = 'shared_board_' + window.location.pathname;
+        const SYNC_INTERVAL = 2000; // 2秒同步一次
         
-        async function loadMessages() {
-            if (!currentCid) {
-                document.getElementById('messageList').innerHTML = '— no messages yet —';
-                return;
-            }
+        let messages = [];
+        let peerId = Math.random().toString(36).substring(2);
+        let lastSync = 0;
+        
+        // === WebRTC 信令服务器（免费）===
+        const SIGNAL_SERVER = 'wss://ws.postman-echo.com/raw'; // 公共WebSocket回显服务器
+        
+        let ws = null;
+        let peers = new Map();
+        
+        // 初始化WebSocket连接
+        function initWebSocket() {
+            ws = new WebSocket(SIGNAL_SERVER);
             
-            try {
-                const chunks = [];
-                for await (const chunk of ipfs.cat(currentCid)) {
-                    chunks.push(chunk);
+            ws.onopen = () => {
+                console.log('connected to signal server');
+                // 加入房间
+                ws.send(JSON.stringify({
+                    type: 'join',
+                    room: ROOM_NAME,
+                    peerId: peerId
+                }));
+            };
+            
+            ws.onmessage = async (e) => {
+                try {
+                    const data = JSON.parse(e.data);
+                    
+                    if (data.type === 'peers') {
+                        // 收到其他在线用户列表
+                        data.peers.forEach(otherPeer => {
+                            if (otherPeer !== peerId && !peers.has(otherPeer)) {
+                                connectToPeer(otherPeer);
+                            }
+                        });
+                    }
+                    
+                    if (data.type === 'signal') {
+                        // 处理P2P信令
+                        handleSignal(data);
+                    }
+                    
+                    if (data.type === 'message') {
+                        // 直接收到消息广播
+                        if (data.sender !== peerId) {
+                            mergeMessages(data.messages);
+                        }
+                    }
+                } catch (err) {
+                    console.log('ws message error:', err);
                 }
-                const data = JSON.parse(new TextDecoder().decode(chunks[0]));
-                displayMessages(data.messages || []);
-            } catch (e) {
-                document.getElementById('messageList').innerHTML = '— no messages yet —';
+            };
+            
+            // 断线重连
+            ws.onclose = () => {
+                setTimeout(initWebSocket, 3000);
+            };
+        }
+        
+        // 连接到新peer
+        function connectToPeer(targetPeerId) {
+            console.log('connecting to peer:', targetPeerId);
+            
+            const pc = new RTCPeerConnection({
+                iceServers: [{ urls: 'stun:stun.l.google.com:19302' }]
+            });
+            
+            // 创建数据通道
+            const dc = pc.createDataChannel('messages');
+            setupDataChannel(dc, targetPeerId);
+            
+            // 处理ICE候选
+            pc.onicecandidate = (e) => {
+                if (e.candidate) {
+                    ws.send(JSON.stringify({
+                        type: 'signal',
+                        target: targetPeerId,
+                        candidate: e.candidate
+                    }));
+                }
+            };
+            
+            // 处理对方发来的offer
+            pc.ondatachannel = (e) => {
+                setupDataChannel(e.channel, targetPeerId);
+            };
+            
+            // 创建offer
+            pc.createOffer().then(offer => {
+                pc.setLocalDescription(offer);
+                ws.send(JSON.stringify({
+                    type: 'signal',
+                    target: targetPeerId,
+                    offer: offer
+                }));
+            });
+            
+            peers.set(targetPeerId, { pc, dc: null });
+        }
+        
+        // 设置数据通道
+        function setupDataChannel(dc, peerId) {
+            dc.onopen = () => {
+                console.log('data channel open with', peerId);
+                // 连接建立后立即同步现有消息
+                dc.send(JSON.stringify({
+                    type: 'sync',
+                    messages: messages,
+                    sender: peerId
+                }));
+            };
+            
+            dc.onmessage = (e) => {
+                try {
+                    const data = JSON.parse(e.data);
+                    if (data.type === 'sync' || data.type === 'update') {
+                        mergeMessages(data.messages);
+                    }
+                } catch (err) {}
+            };
+            
+            if (peers.has(peerId)) {
+                peers.get(peerId).dc = dc;
             }
         }
         
-        async function postMessage() {
-            const name = document.getElementById('nameInput').value.trim();
-            const text = document.getElementById('msgInput').value.trim();
-            if (!name || !text) return;
+        // 处理信令
+        function handleSignal(data) {
+            let peer = peers.get(data.sender);
             
-            let messages = [];
-            if (currentCid) {
-                try {
-                    const chunks = [];
-                    for await (const chunk of ipfs.cat(currentCid)) {
-                        chunks.push(chunk);
+            if (!peer) {
+                // 被动接收连接
+                const pc = new RTCPeerConnection({
+                    iceServers: [{ urls: 'stun:stun.l.google.com:19302' }]
+                });
+                
+                pc.ondatachannel = (e) => {
+                    setupDataChannel(e.channel, data.sender);
+                };
+                
+                pc.onicecandidate = (e) => {
+                    if (e.candidate) {
+                        ws.send(JSON.stringify({
+                            type: 'signal',
+                            target: data.sender,
+                            candidate: e.candidate
+                        }));
                     }
-                    messages = JSON.parse(new TextDecoder().decode(chunks[0])).messages || [];
-                } catch (e) {}
+                };
+                
+                peer = { pc, dc: null };
+                peers.set(data.sender, peer);
             }
             
+            if (data.offer) {
+                peer.pc.setRemoteDescription(new RTCSessionDescription(data.offer));
+                peer.pc.createAnswer().then(answer => {
+                    peer.pc.setLocalDescription(answer);
+                    ws.send(JSON.stringify({
+                        type: 'signal',
+                        target: data.sender,
+                        answer: answer
+                    }));
+                });
+            }
+            
+            if (data.answer) {
+                peer.pc.setRemoteDescription(new RTCSessionDescription(data.answer));
+            }
+            
+            if (data.candidate) {
+                peer.pc.addIceCandidate(new RTCIceCandidate(data.candidate));
+            }
+        }
+        
+        // 合并消息
+        function mergeMessages(newMessages) {
+            let changed = false;
+            
+            newMessages.forEach(newMsg => {
+                const exists = messages.some(m => m.id === newMsg.id);
+                if (!exists && Date.now() - newMsg.timestamp < 300000) {
+                    messages.push(newMsg);
+                    changed = true;
+                }
+            });
+            
+            if (changed) {
+                messages.sort((a, b) => a.timestamp - b.timestamp);
+                saveMessages();
+                displayMessages();
+            }
+        }
+        
+        // 广播给所有连接的peer
+        function broadcastToPeers(data) {
+            peers.forEach((peer, id) => {
+                if (peer.dc && peer.dc.readyState === 'open') {
+                    try {
+                        peer.dc.send(JSON.stringify(data));
+                    } catch (err) {}
+                }
+            });
+            
+            // 也通过WebSocket广播
+            if (ws && ws.readyState === WebSocket.OPEN) {
+                ws.send(JSON.stringify({
+                    type: 'message',
+                    messages: data.messages || messages,
+                    sender: peerId
+                }));
+            }
+        }
+        
+        // 加载本地存储
+        function loadMessages() {
+            try {
+                const saved = localStorage.getItem('webrtc_messages');
+                if (saved) {
+                    messages = JSON.parse(saved);
+                }
+            } catch (e) {}
+            
+            // 清理过期
             const now = Date.now();
-            messages.push({ name, text, timestamp: now });
             messages = messages.filter(m => now - m.timestamp < 300000);
+            saveMessages();
+            displayMessages();
             
-            const { cid } = await ipfs.add(JSON.stringify({ messages }));
-            currentCid = cid.toString();
+            document.getElementById('status').textContent = 
+                `🌐 ${peers.size} peer(s) connected · ${messages.length} messages`;
+        }
+        
+        function saveMessages() {
+            localStorage.setItem('webrtc_messages', JSON.stringify(messages));
+        }
+        
+        // 显示留言
+        function displayMessages() {
+            const container = document.getElementById('messageList');
             
-            localStorage.setItem('lastCid', currentCid);
-            window.location.hash = currentCid;
-            loadMessages();
+            if (messages.length === 0) {
+                container.innerHTML = '<div>— no messages yet —</div>';
+                return;
+            }
+            
+            let html = '';
+            for (let i = messages.length - 1; i >= 0; i--) {
+                const msg = messages[i];
+                const timeLeft = Math.max(0, 300 - Math.floor((Date.now() - msg.timestamp) / 1000));
+                
+                html += `<div style="border:1px solid #ccc; padding:8px; margin:5px 0;">
+                    <strong>${escapeHtml(msg.name)}:</strong> 
+                    <span>${escapeHtml(msg.text)}</span>
+                    <small style="color:#999; margin-left:10px;">⏱️ ${timeLeft}s</small>
+                </div>`;
+            }
+            container.innerHTML = html;
+            
+            document.getElementById('status').textContent = 
+                `🌐 ${peers.size} peer(s) connected · ${messages.length} messages`;
+        }
+        
+        // 发布留言
+        function postMessage() {
+            const name = document.getElementById('nameInput').value.trim();
+            const text = document.getElementById('msgInput').value.trim();
+            
+            if (!name || !text) {
+                alert('name and message are required');
+                return;
+            }
+            
+            const newMsg = {
+                id: Date.now() + '-' + Math.random(),
+                name: name,
+                text: text,
+                timestamp: Date.now()
+            };
+            
+            messages.push(newMsg);
+            messages = messages.filter(m => Date.now() - m.timestamp < 300000);
+            saveMessages();
+            displayMessages();
+            
+            // 广播给所有人
+            broadcastToPeers({
+                type: 'update',
+                messages: [newMsg]
+            });
             
             document.getElementById('nameInput').value = '';
             document.getElementById('msgInput').value = '';
         }
         
-        function displayMessages(messages) {
-            const html = messages.length ? messages.reverse().map(m => 
-                `<div style="border:1px solid #ccc; padding:8px; margin:5px 0;">
-                    <strong>${escapeHtml(m.name)}:</strong> ${escapeHtml(m.text)}
-                </div>`
-            ).join('') : '— no messages yet —';
-            
-            document.getElementById('messageList').innerHTML = html;
-        }
-        
         function escapeHtml(unsafe) {
-            return unsafe.replace(/[&<>"]/g, function(m) {
-                if(m === '&') return '&amp;'; if(m === '<') return '&lt;';
-                if(m === '>') return '&gt;'; if(m === '"') return '&quot;';
-                return m;
-            });
+            if (!unsafe) return '';
+            return unsafe
+                .replace(/&/g, '&amp;')
+                .replace(/</g, '&lt;')
+                .replace(/>/g, '&gt;')
+                .replace(/"/g, '&quot;')
+                .replace(/'/g, '&#039;');
         }
         
-        if (window.location.hash) {
-            currentCid = window.location.hash.substring(1);
-            localStorage.setItem('lastCid', currentCid);
-        } else if (currentCid) {
-            window.location.hash = currentCid;
-        }
+        // 定期清理过期 + 更新显示
+        setInterval(() => {
+            const before = messages.length;
+            messages = messages.filter(m => Date.now() - m.timestamp < 300000);
+            if (messages.length !== before) {
+                saveMessages();
+                displayMessages();
+                broadcastToPeers({ type: 'sync', messages: messages });
+            } else {
+                displayMessages(); // 更新时间显示
+            }
+        }, 1000);
         
+        // 启动WebSocket连接
+        initWebSocket();
         loadMessages();
-        setInterval(loadMessages, 5000);
     </script>
 </body>
 </html>
