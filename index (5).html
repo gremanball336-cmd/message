@@ -1,0 +1,95 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+    <meta charset="UTF-8">
+    <title>guestbook working</title>
+</head>
+<body>
+    <h2>leave a message</h2>
+    <form id="messageForm">
+        <div>
+            <label for="name">your name:</label><br>
+            <input type="text" id="name" placeholder="john" required>
+        </div>
+        <div style="margin-top: 0.5em;">
+            <label for="message">message:</label><br>
+            <textarea id="message" rows="3" cols="30" placeholder="type here..." required></textarea>
+        </div>
+        <div style="margin-top: 0.5em;">
+            <button type="button" id="postButton">post message</button>
+        </div>
+    </form>
+    <hr>
+    <h3>recent messages</h3>
+    <div id="messageContainer"></div>
+    <button id="clearButton">clear all messages</button>
+
+    <script>
+        (function() {
+            const STORAGE_KEY = 'guestbook_messages';
+            function loadMessages() {
+                try {
+                    const stored = localStorage.getItem(STORAGE_KEY);
+                    return stored ? JSON.parse(stored) : [];
+                } catch { return []; }
+            }
+            function saveMessages(messages) {
+                localStorage.setItem(STORAGE_KEY, JSON.stringify(messages));
+            }
+            function escapeHtml(unsafe) {
+                if (!unsafe) return '';
+                return unsafe
+                    .replace(/&/g, '&amp;')
+                    .replace(/</g, '&lt;')
+                    .replace(/>/g, '&gt;')
+                    .replace(/"/g, '&quot;')
+                    .replace(/'/g, '&#039;');
+            }
+            function renderMessages() {
+                const messages = loadMessages();
+                const container = document.getElementById('messageContainer');
+                if (!container) return;
+                if (messages.length === 0) {
+                    container.innerHTML = '<div>— no messages yet —</div>';
+                    return;
+                }
+                let html = '';
+                for (let i = 0; i < messages.length; i++) {
+                    const msg = messages[i];
+                    html += '<div style="border:1px solid #ccc; padding:0.5em; margin-bottom:0.5em;">' +
+                        '<strong>' + escapeHtml(msg.name) + ':</strong> ' +
+                        '<span>' + escapeHtml(msg.text) + '</span>' +
+                        '</div>';
+                }
+                container.innerHTML = html;
+            }
+
+            document.getElementById('postButton')?.addEventListener('click', function() {
+                const nameInput = document.getElementById('name');
+                const msgInput = document.getElementById('message');
+                const name = nameInput.value.trim();
+                const text = msgInput.value.trim();
+                if (name === '' || text === '') {
+                    alert('both fields are required');
+                    return;
+                }
+                const messages = loadMessages();
+                messages.push({ name: name, text: text });
+                saveMessages(messages);
+                renderMessages();
+                nameInput.value = '';
+                msgInput.value = '';
+            });
+
+            document.getElementById('clearButton')?.addEventListener('click', function() {
+                if (confirm('delete all messages?')) {
+                    localStorage.removeItem(STORAGE_KEY);
+                    renderMessages();
+                }
+            });
+
+            renderMessages();
+        })();
+    </script>
+</body>
+</html>
