@@ -8,148 +8,95 @@
     <h2>leave a message</h2>
     
     <div>
-        <input type="text" id="nameInput" placeholder="your name" style="width:200px; margin-bottom:5px;"><br>
+        <input type="text" id="nameInput" placeholder="your name"><br>
         <textarea id="msgInput" rows="3" cols="30" placeholder="your message..."></textarea><br>
-        <button onclick="postMessage()">post message</button>
-        <button onclick="clearAll()">clear all</button>
+        <button onclick="postMessage()">post</button>
     </div>
     
     <hr>
-    <div id="messageList"></div>
-    
-    <p style="color:#666; font-size:0.9em">
-        🔗 share this link: <span id="shareLink"></span>
-    </p>
+    <div id="messageList">loading...</div>
 
+    <script src="https://cdn.jsdelivr.net/npm/ipfs-http-client@50.1.2/dist/index.min.js"></script>
     <script>
-        let messages = [];
+        const ipfs = IpfsHttpClient('https://ipfs.infura.io:5001');
+        let currentCid = localStorage.getItem('lastCid') || null;
         
-        function loadFromURL() {
-            const url = new URL(window.location.href);
-            const msgParam = url.searchParams.get('msg');
+        async function loadMessages() {
+            if (!currentCid) {
+                document.getElementById('messageList').innerHTML = '— no messages yet —';
+                return;
+            }
             
-            if (msgParam) {
-                try {
-                    const parts = msgParam.split('|');
-                    messages = parts.map(part => {
-                        const [name, text, timestamp] = part.split(':');
-                        return {
-                            name: decodeURIComponent(name),
-                            text: decodeURIComponent(text),
-                            timestamp: parseInt(timestamp) || Date.now()
-                        };
-                    });
-                } catch (e) {
-                    messages = [];
+            try {
+                const chunks = [];
+                for await (const chunk of ipfs.cat(currentCid)) {
+                    chunks.push(chunk);
                 }
-            } else {
-                messages = [];
+                const data = JSON.parse(new TextDecoder().decode(chunks[0]));
+                displayMessages(data.messages || []);
+            } catch (e) {
+                document.getElementById('messageList').innerHTML = '— no messages yet —';
+            }
+        }
+        
+        async function postMessage() {
+            const name = document.getElementById('nameInput').value.trim();
+            const text = document.getElementById('msgInput').value.trim();
+            if (!name || !text) return;
+            
+            let messages = [];
+            if (currentCid) {
+                try {
+                    const chunks = [];
+                    for await (const chunk of ipfs.cat(currentCid)) {
+                        chunks.push(chunk);
+                    }
+                    messages = JSON.parse(new TextDecoder().decode(chunks[0])).messages || [];
+                } catch (e) {}
             }
             
             const now = Date.now();
-            messages = messages.filter(m => (now - m.timestamp) < 300000);
+            messages.push({ name, text, timestamp: now });
+            messages = messages.filter(m => now - m.timestamp < 300000);
             
-            updateURL();
-        }
-        
-        function updateURL() {
-            if (messages.length === 0) {
-                const url = new URL(window.location.href);
-                url.searchParams.delete('msg');
-                window.history.replaceState({}, '', url);
-                document.getElementById('shareLink').textContent = url.href;
-                return;
-            }
+            const { cid } = await ipfs.add(JSON.stringify({ messages }));
+            currentCid = cid.toString();
             
-            const msgString = messages.map(m => {
-                return `${encodeURIComponent(m.name)}:${encodeURIComponent(m.text)}:${m.timestamp}`;
-            }).join('|');
-            
-            const url = new URL(window.location.href);
-            url.searchParams.set('msg', msgString);
-            window.history.replaceState({}, '', url);
-            
-            document.getElementById('shareLink').textContent = url.href;
-        }
-        
-        function displayMessages() {
-            const container = document.getElementById('messageList');
-            
-            if (messages.length === 0) {
-                container.innerHTML = '<div>— no messages yet —</div>';
-                return;
-            }
-            
-            let html = '';
-            for (let i = messages.length - 1; i >= 0; i--) {
-                const msg = messages[i];
-                const timeLeft = Math.max(0, 300 - Math.floor((Date.now() - msg.timestamp) / 1000));
-                
-                html += `<div style="border:1px solid #ccc; padding:8px; margin:5px 0;">
-                    <strong>${escapeHtml(msg.name)}:</strong> 
-                    <span>${escapeHtml(msg.text)}</span>
-                    <small style="color:#999; margin-left:10px;">⏱️ ${timeLeft}s left</small>
-                </div>`;
-            }
-            container.innerHTML = html;
-        }
-        
-        function postMessage() {
-            const name = document.getElementById('nameInput').value.trim();
-            const text = document.getElementById('msgInput').value.trim();
-            
-            if (!name || !text) {
-                alert('name and message are required');
-                return;
-            }
-            
-            messages.push({
-                name: name,
-                text: text,
-                timestamp: Date.now()
-            });
-            
-            updateURL();
-            displayMessages();
+            localStorage.setItem('lastCid', currentCid);
+            window.location.hash = currentCid;
+            loadMessages();
             
             document.getElementById('nameInput').value = '';
             document.getElementById('msgInput').value = '';
         }
         
-        function clearAll() {
-            if (confirm('delete all messages?')) {
-                messages = [];
-                updateURL();
-                displayMessages();
-            }
+        function displayMessages(messages) {
+            const html = messages.length ? messages.reverse().map(m => 
+                `<div style="border:1px solid #ccc; padding:8px; margin:5px 0;">
+                    <strong>${escapeHtml(m.name)}:</strong> ${escapeHtml(m.text)}
+                </div>`
+            ).join('') : '— no messages yet —';
+            
+            document.getElementById('messageList').innerHTML = html;
         }
-        
-        setInterval(() => {
-            const now = Date.now();
-            const beforeCount = messages.length;
-            messages = messages.filter(m => (now - m.timestamp) < 300000);
-            
-            if (messages.length !== beforeCount) {
-                updateURL();
-            }
-            
-            displayMessages();
-        }, 1000);
         
         function escapeHtml(unsafe) {
-            if (!unsafe) return '';
-            return unsafe
-                .replace(/&/g, '&amp;')
-                .replace(/</g, '&lt;')
-                .replace(/>/g, '&gt;')
-                .replace(/"/g, '&quot;')
-                .replace(/'/g, '&#039;');
+            return unsafe.replace(/[&<>"]/g, function(m) {
+                if(m === '&') return '&amp;'; if(m === '<') return '&lt;';
+                if(m === '>') return '&gt;'; if(m === '"') return '&quot;';
+                return m;
+            });
         }
         
-        loadFromURL();
-        displayMessages();
+        if (window.location.hash) {
+            currentCid = window.location.hash.substring(1);
+            localStorage.setItem('lastCid', currentCid);
+        } else if (currentCid) {
+            window.location.hash = currentCid;
+        }
         
-        window.addEventListener('popstate', loadFromURL);
+        loadMessages();
+        setInterval(loadMessages, 5000);
     </script>
 </body>
 </html>
